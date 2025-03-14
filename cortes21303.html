@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <!-- Meta viewport para responsividad -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sistema de Cortes – Integración 2D Cutting</title>
+  <!-- Bootstrap CSS -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <!-- Integración de la librería 2D Cutting (si está disponible en este CDN) -->
+  <script src="https://unpkg.com/2dcutter@1.1.0/dist/2dcutter.min.js"></script>
+  <style>
+    /* Contenedor responsive para el canvas */
+    .responsive-canvas-container {
+      width: 100%;
+      overflow-x: auto; /* Si la placa es muy ancha se muestra barra horizontal */
+    }
+    canvas {
+      border: 1px solid #333;
+      background-color: #f8f9fa;
+      cursor: pointer;
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0 auto;
+      position: relative;
+    }
+  </style>
+</head>
+<body>
+<div class="container my-4">
+  <h1 class="mb-4">Sistema de Cortes de Madera / Tableros</h1>
+  
+  <p class="text-secondary">
+    <strong>Nota:</strong> Este sistema integra:
+    <ul>
+      <li>Algoritmo de 2D Cutting (o “greedy” si no está disponible)</li>
+      <li>Modo manual (clic en el canvas)</li>
+      <li>Cálculo de <strong>restos sobrantes</strong> (mayor rectángulo libre)</li>
+      <li>Sugerencia de qué cortes podrían caber en el espacio sobrante</li>
+      <li>Regla con medidas en cm y <strong>indicador del tamaño en px</strong></li>
+    </ul>
+  </p>
+
+  <!-- Formulario de configuración -->
+  <form id="configForm">
+    <div class="row mb-3">
+      <div class="col-md-3 col-sm-6">
+        <label for="baseWidth" class="form-label">Ancho de la Placa (cm)</label>
+        <input type="number" class="form-control" id="baseWidth" min="1" required>
+      </div>
+      <div class="col-md-3 col-sm-6">
+        <label for="baseHeight" class="form-label">Alto de la Placa (cm)</label>
+        <input type="number" class="form-control" id="baseHeight" min="1" required>
+      </div>
+      <div class="col-md-3 col-sm-6">
+        <label for="baseThickness" class="form-label">Espesor (mm) (opcional)</label>
+        <input type="number" class="form-control" id="baseThickness" min="1" placeholder="18">
+      </div>
+      <div class="col-md-3 col-sm-6">
+        <label for="materialType" class="form-label">Tipo de Material</label>
+        <input type="text" class="form-control" id="materialType" placeholder="Ej: MDF Crudo">
+      </div>
+    </div>
+
+    <div class="row mb-3">
+      <div class="col-12">
+        <label class="form-label d-block">Modo de Ubicación</label>
+        <div class="form-check form-check-inline">
+          <input class="form-check-input" type="radio" name="mode" id="autoMode" value="auto" checked>
+          <label class="form-check-label" for="autoMode">Automático</label>
+        </div>
+        <div class="form-check form-check-inline">
+          <input class="form-check-input" type="radio" name="mode" id="manualMode" value="manual">
+          <label class="form-check-label" for="manualMode">Manual</label>
+        </div>
+      </div>
+    </div>
+
+    <h4>Cortes</h4>
+    <div id="piecesContainer"></div>
+    <button type="button" class="btn btn-secondary mb-3" id="addPiece">Añadir Corte</button>
+
+    <!-- Opcional: permitir rotación de piezas -->
+    <div class="form-check mb-3">
+      <input class="form-check-input" type="checkbox" id="allowRotation" checked>
+      <label class="form-check-label" for="allowRotation">
+        Permitir rotación de piezas
+      </label>
+    </div>
+
+    <button type="submit" class="btn btn-primary">Visualizar Cortes</button>
+  </form>
+
+  <hr class="my-4">
+
+  <!-- Visualización y resumen -->
+  <div class="row">
+    <div class="col-md-6 col-sm-12">
+      <h4>Visualización</h4>
+      <small class="text-muted d-block mb-2">
+        Haga click en la placa para colocar cortes manualmente (modo manual).
+      </small>
+      <div class="responsive-canvas-container">
+        <canvas id="boardCanvas"></canvas>
+      </div>
+    </div>
+    <div class="col-md-6 col-sm-12">
+      <h4>Resumen de Cortes</h4>
+      <div class="mb-3">
+        <button id="printBtn" class="btn btn-success btn-sm">Imprimir/Exportar</button>
+      </div>
+      <div id="summary"></div>
+      <div id="errorMsg" class="mt-3 text-danger"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Bootstrap JS -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+  // =========================
+  // 1. VARIABLES GLOBALES
+  // =========================
+  let baseWidth, baseHeight, baseThickness, materialType;
+  let mode;
+  let pieces = [];         // { id, label, width, height, quantity, color }
+  let placedPieces = [];   // { pieceId, x, y, width, height, color, label }
+  let currentManualIndex = 0;
+  let manualPieces = [];
+
+  const canvas = document.getElementById('boardCanvas');
+  const ctx = canvas.getContext('2d');
+  const errorMsg = document.getElementById('errorMsg');
+  const summaryDiv = document.getElementById('summary');
+  // Escala: 1 cm = 5 px (ajústalo a conveniencia)
+  const SCALE = 5;
+
+  // =========================
+  // 2. DATOS POR DEFECTO
+  // =========================
+  function loadDefaultData() {
+    // Ajusta aquí las dimensiones de la placa si deseas
+    document.getElementById('baseWidth').value = 275;
+    document.getElementById('baseHeight').value = 183;
+    document.getElementById('baseThickness').value = 18;
+    document.getElementById('materialType').value = "MDF Crudo";
+
+    // Lista de cortes
+    const defaultPieces = [
+      { label: "Corte 1", width: 75, height: 40, quantity: 1 },
+      { label: "Corte 2", width: 80, height: 28, quantity: 3 },
+      { label: "Corte 3", width: 50, height: 50, quantity: 12 },
+      { label: "Corte 4", width: 40, height: 30, quantity: 2 },
+      { label: "Corte 5", width: 28, height: 28, quantity: 1 }
+    ];
+
+    // Crear las filas en el formulario
+    const container = document.getElementById('piecesContainer');
+    container.innerHTML = "";
+    defaultPieces.forEach((item, index) => {
+      const row = document.createElement('div');
+      row.className = 'row mb-2 align-items-end';
+      row.innerHTML = `
+        <div class="col-md-2 col-sm-6">
+          <label class="form-label">Etiqueta</label>
+          <input type="text" class="form-control piece-label" value="${item.label}">
+        </div>
+        <div class="col-md-2 col-sm-6">
+          <label class="form-label">Ancho (cm)</label>
+          <input type="number" class="form-control piece-width" value="${item.width}" min="1" required>
+        </div>
+        <div class="col-md-2 col-sm-6">
+          <label class="form-label">Alto (cm)</label>
+          <input type="number" class="form-control piece-height" value="${item.height}" min="1" required>
+        </div>
+        <div class="col-md-2 col-sm-6">
+          <label class="form-label">Cantidad</label>
+          <input type="number" class="form-control piece-quantity" value="${item.quantity}" min="1" required>
+        </div>
+        <div class="col-md-2 col-sm-6">
+          <button type="button" class="btn btn-danger removePiece">Eliminar</button>
+        </div>
+      `;
+      container.appendChild(row);
+    });
+  }
+
+  // =========================
+  // 3. FUNCIONES GENERALES
+  // =========================
+  // Generar un color aleatorio
+  function randomColor() {
+    const r = Math.floor(Math.random() * 200 + 30);
+    const g = Math.floor(Math.random() * 200 + 30);
+    const b = Math.floor(Math.random() * 200 + 30);
+    return `rgb(${r},${g},${b})`;
+  }
+
+  // Añadir una fila para un nuevo corte
+  function addPieceRow() {
+    const container = document.getElementById('piecesContainer');
+    const row = document.createElement('div');
+    row.className = 'row mb-2 align-items-end';
+    row.innerHTML = `
+      <div class="col-md-2 col-sm-6">
+        <label class="form-label">Etiqueta</label>
+        <input type="text" class="form-control piece-label" placeholder="Ej: Frente">
+      </div>
+      <div class="col-md-2 col-sm-6">
+        <label class="form-label">Ancho (cm)</label>
+        <input type="number" class="form-control piece-width" min="1" required>
+      </div>
+      <div class="col-md-2 col-sm-6">
+        <label class="form-label">Alto (cm)</label>
+        <input type="number" class="form-control piece-height" min="1" required>
+      </div>
+      <div class="col-md-2 col-sm-6">
+        <label class="form-label">Cantidad</label>
+        <input type="number" class="form-control piece-quantity" min="1" required>
+      </div>
+      <div class="col-md-2 col-sm-6">
+        <button type="button" class="btn btn-danger removePiece">Eliminar</button>
+      </div>
+    `;
+    container.appendChild(row);
+  }
+
+  // Eliminar fila de corte
+  document.getElementById('piecesContainer').addEventListener('click', function(e) {
+    if (e.target.classList.contains('removePiece')) {
+      e.target.closest('.row').remove();
+    }
+  });
+
+  // Botón para añadir corte
+  document.getElementById('addPiece').addEventListener('click', addPieceRow);
+
+  // Leer datos del formulario
+  function readForm() {
+    errorMsg.textContent = "";
+    baseWidth = parseInt(document.getElementById('baseWidth').value);
+    baseHeight = parseInt(document.getElementById('baseHeight').value);
+    baseThickness = document.getElementById('baseThickness').value;
+    materialType = document.getElementById('materialType').value || "Sin especificar";
+    mode = document.querySelector('input[name="mode"]:checked').value;
+
+    if (!baseWidth || !baseHeight || baseWidth <= 0 || baseHeight <= 0) {
+      throw new Error("Las dimensiones de la placa deben ser mayores a cero.");
+    }
+
+    pieces = [];
+    const rows = document.querySelectorAll('#piecesContainer .row');
+    let idCounter = 0;
+    rows.forEach(row => {
+      const label = row.querySelector('.piece-label').value || `Pieza ${idCounter}`;
+      const width = parseInt(row.querySelector('.piece-width').value);
+      const height = parseInt(row.querySelector('.piece-height').value);
+      const quantity = parseInt(row.querySelector('.piece-quantity').value);
+      if (!width || !height || !quantity || width <= 0 || height <= 0 || quantity <= 0) {
+        throw new Error("Todos los cortes deben tener dimensiones y cantidades válidas.");
+      }
+      pieces.push({
+        id: idCounter++,
+        label,
+        width,
+        height,
+        quantity,
+        color: randomColor()
+      });
+    });
+
+    if (pieces.length === 0) {
+      throw new Error("Debe ingresar al menos un corte.");
+    }
+  }
+
+  // =========================
+  // 4. DIBUJAR LA PLACA Y LAS PIEZAS
+  // =========================
+  function drawBoard() {
+    // Ajustar tamaño interno del canvas
+    canvas.width = baseWidth * SCALE;
+    canvas.height = baseHeight * SCALE;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Dibujar contorno de la placa
+    ctx.strokeStyle = "#000";
+    ctx.strokeRect(0, 0, canvas.width, canvas.height);
+
+    // Dibujar cada pieza colocada
+    placedPieces.forEach(piece => {
+      ctx.fillStyle = piece.color;
+      ctx.fillRect(piece.x * SCALE, piece.y * SCALE, piece.width * SCALE, piece.height * SCALE);
+      ctx.strokeRect(piece.x * SCALE, piece.y * SCALE, piece.width * SCALE, piece.height * SCALE);
+      
+      // Etiqueta en el centro
+      const centerX = (piece.x + piece.width / 2) * SCALE;
+      const centerY = (piece.y + piece.height / 2) * SCALE;
+      ctx.fillStyle = "#000";
+      ctx.font = "bold 12px Arial";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(`${piece.label}\n${piece.width}x${piece.height}`, centerX, centerY);
+    });
+
+    // Dibujar reglas y medida
+    drawRulers();
+    drawVisualizerInfo();
+  }
+
+  // Dibujar reglas en la parte superior e izquierda
+  function drawRulers() {
+    ctx.save();
+    ctx.strokeStyle = "#555";
+    ctx.fillStyle = "#555";
+    ctx.lineWidth = 1;
+    // Intervalo en cm para los ticks (por ejemplo, cada 50 cm)
+    const tickInterval = 50;
+
+    // Regla horizontal (parte superior)
+    for (let cm = 0; cm <= baseWidth; cm += tickInterval) {
+      let x = cm * SCALE;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, 10);
+      ctx.stroke();
+      ctx.font = "10px Arial";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(cm + " cm", x + 2, 2);
+    }
+    // Regla vertical (lado izquierdo)
+    for (let cm = 0; cm <= baseHeight; cm += tickInterval) {
+      let y = cm * SCALE;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(10, y);
+      ctx.stroke();
+      ctx.font = "10px Arial";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(cm + " cm", 12, y);
+    }
+    ctx.restore();
+  }
+
+  // Mostrar en la esquina superior del canvas la medida en cm y px
+  function drawVisualizerInfo() {
+    ctx.save();
+    ctx.fillStyle = "#000";
+    ctx.font = "12px Arial";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+
+    const text = `Visualizador: ${baseWidth}x${baseHeight} cm | ${canvas.width}x${canvas.height} px`;
+    ctx.fillText(text, canvas.width - 5, 2);
+    ctx.restore();
+  }
+
+  // =========================
+  // 5. ALGORITMO AUTOMÁTICO (2D Cutting o básico)
+  // =========================
+  function autoPlacePiecesWith2DCutting() {
+    const allowRotation = document.getElementById('allowRotation').checked;
+    const config = {
+      binWidth: baseWidth,
+      binHeight: baseHeight,
+      allowRotation: allowRotation,
+      rectangles: []
+    };
+
+    pieces.forEach(piece => {
+      for (let i = 0; i < piece.quantity; i++) {
+        config.rectangles.push({
+          width: piece.width,
+          height: piece.height,
+          data: piece
+        });
+      }
+    });
+
+    // Si TwoDCutter está definido, lo usamos; si no, fallback
+    if (typeof TwoDCutter !== 'undefined') {
+      try {
+        const result = TwoDCutter.cut(config);
+        placedPieces = result.map(item => {
+          const piece = item.data;
+          return {
+            pieceId: piece.id,
+            label: piece.label,
+            x: item.x,
+            y: item.y,
+            width: item.width,
+            height: item.height,
+            color: piece.color
+          };
+        });
+      } catch (error) {
+        throw new Error("Error en la función de 2D Cutting: " + error.message);
+      }
+    } else {
+      console.warn("TwoDCutter no está definido. Se usará el algoritmo básico.");
+      basicAutoPlacePieces();
+    }
+  }
+
+  // Algoritmo básico de colocación (greedy)
+  function basicAutoPlacePieces() {
+    placedPieces = [];
+    const grid = [];
+    for (let y = 0; y < baseHeight; y++) {
+      grid[y] = Array(baseWidth).fill(0);
+    }
+
+    function canPlace(x, y, w, h) {
+      if (x + w > baseWidth || y + h > baseHeight) return false;
+      for (let i = y; i < y + h; i++) {
+        for (let j = x; j < x + w; j++) {
+          if (grid[i][j] !== 0) return false;
+        }
+      }
+      return true;
+    }
+
+    function occupy(x, y, w, h) {
+      for (let i = y; i < y + h; i++) {
+        for (let j = x; j < x + w; j++) {
+          grid[i][j] = 1;
+        }
+      }
+    }
+
+    const allowRotation = document.getElementById('allowRotation').checked;
+    for (const piece of pieces) {
+      let count = piece.quantity;
+      while (count > 0) {
+        let placed = false;
+        for (let y = 0; y < baseHeight; y++) {
+          for (let x = 0; x < baseWidth; x++) {
+            // Sin rotar
+            if (canPlace(x, y, piece.width, piece.height)) {
+              occupy(x, y, piece.width, piece.height);
+              placedPieces.push({
+                pieceId: piece.id,
+                label: piece.label,
+                x, y,
+                width: piece.width,
+                height: piece.height,
+                color: piece.color
+              });
+              placed = true;
+              break;
+            }
+            // Con rotación (si se permite)
+            if (allowRotation && piece.width !== piece.height && canPlace(x, y, piece.height, piece.width)) {
+              occupy(x, y, piece.height, piece.width);
+              placedPieces.push({
+                pieceId: piece.id,
+                label: piece.label,
+                x, y,
+                width: piece.height,
+                height: piece.width,
+                color: piece.color
+              });
+              placed = true;
+              break;
+            }
+          }
+          if (placed) break;
+        }
+        if (!placed) {
+          throw new Error(`No se pudo ubicar la pieza "${piece.label}" (${piece.width}x${piece.height}).`);
+        }
+        count--;
+      }
+    }
+  }
+
+  // =========================
+  // 6. ALGORITMOS PARA SOBRANTES
+  // =========================
+  // Crear grilla de ocupación (0 = libre, 1 = ocupado)
+  function getOccupancyGrid() {
+    let grid = [];
+    for (let i = 0; i < baseHeight; i++) {
+      grid[i] = Array(baseWidth).fill(0);
+    }
+    placedPieces.forEach(piece => {
+      for (let y = piece.y; y < piece.y + piece.height; y++) {
+        for (let x = piece.x; x < piece.x + piece.width; x++) {
+          if (y < baseHeight && x < baseWidth) {
+            grid[y][x] = 1;
+          }
+        }
+      }
+    });
+    return grid;
+  }
+
+  // largestRectangleArea (histogram approach)
+  function largestRectangleArea(heights) {
+    let stack = [];
+    let maxArea = 0, maxWidth = 0, maxHeight = 0;
+    heights.push(0);
+    for (let i = 0; i < heights.length; i++) {
+      while (stack.length && heights[i] < heights[stack[stack.length - 1]]) {
+        let h = heights[stack.pop()];
+        let width = stack.length ? i - stack[stack.length - 1] - 1 : i;
+        let area = h * width;
+        if (area > maxArea) {
+          maxArea = area;
+          maxHeight = h;
+          maxWidth = width;
+        }
+      }
+      stack.push(i);
+    }
+    heights.pop();
+    return { area: maxArea, width: maxWidth, height: maxHeight };
+  }
+
+  // Calcular el mayor rectángulo libre en la placa
+  function computeMaxFreeRectangle() {
+    let grid = getOccupancyGrid();
+    let rows = grid.length;
+    let cols = grid[0].length;
+    let heights = Array(cols).fill(0);
+    let maxRect = { area: 0, width: 0, height: 0 };
+
+    for (let i = 0; i < rows; i++) {
+      for (let j = 0; j < cols; j++) {
+        if (grid[i][j] === 0) {
+          heights[j]++;
+        } else {
+          heights[j] = 0;
+        }
+      }
+      let rect = largestRectangleArea(heights.slice());
+      if (rect.area > maxRect.area) {
+        maxRect = rect;
+      }
+    }
+    return maxRect;
+  }
+
+  // =========================
+  // 7. MODO MANUAL
+  // =========================
+  function initManualPlacement() {
+    placedPieces = [];
+    manualPieces = [];
+    pieces.forEach(piece => {
+      for (let i = 0; i < piece.quantity; i++) {
+        manualPieces.push({ ...piece });
+      }
+    });
+    currentManualIndex = 0;
+    alert("Modo manual activado. Haga click en la placa para colocar cada pieza en orden.");
+  }
+
+  canvas.addEventListener('click', function(e) {
+    if (mode !== 'manual' || currentManualIndex >= manualPieces.length) return;
+    const rect = canvas.getBoundingClientRect();
+    const clickX = Math.floor((e.clientX - rect.left) / SCALE);
+    const clickY = Math.floor((e.clientY - rect.top) / SCALE);
+
+    const piece = manualPieces[currentManualIndex];
+    const allowRotation = document.getElementById('allowRotation').checked;
+
+    // Verificar si la pieza cabe sin rotar
+    if (clickX + piece.width > baseWidth || clickY + piece.height > baseHeight) {
+      // Intentar rotar
+      if (allowRotation && piece.width !== piece.height) {
+        if (clickX + piece.height <= baseWidth && clickY + piece.width <= baseHeight) {
+          placedPieces.push({
+            pieceId: piece.id,
+            label: piece.label,
+            x: clickX,
+            y: clickY,
+            width: piece.height,
+            height: piece.width,
+            color: piece.color
+          });
+        } else {
+          errorMsg.textContent = "La pieza no cabe en la posición seleccionada. Intente otra ubicación o rotación.";
+          return;
+        }
+      } else {
+        errorMsg.textContent = "La pieza no cabe en la posición seleccionada. Intente otra ubicación.";
+        return;
+      }
+    } else {
+      // Verificar solapamiento
+      for (let p of placedPieces) {
+        const overlap = !(
+          clickX >= p.x + p.width ||
+          clickX + piece.width <= p.x ||
+          clickY >= p.y + p.height ||
+          clickY + piece.height <= p.y
+        );
+        if (overlap) {
+          errorMsg.textContent = "La pieza se solapa con otra. Elija otra posición.";
+          return;
+        }
+      }
+      // Colocar sin rotar
+      placedPieces.push({
+        pieceId: piece.id,
+        label: piece.label,
+        x: clickX,
+        y: clickY,
+        width: piece.width,
+        height: piece.height,
+        color: piece.color
+      });
+    }
+
+    currentManualIndex++;
+    errorMsg.textContent = "";
+    drawBoard();
+
+    if (currentManualIndex === manualPieces.length) {
+      alert("Todas las piezas han sido ubicadas.");
+    }
+  });
+
+  // =========================
+  // 8. RESUMEN DE CORTES (incluye Sobrantes)
+  // =========================
+  function showSummary() {
+    const totalArea = baseWidth * baseHeight;
+    let usedArea = 0;
+    placedPieces.forEach(p => {
+      usedArea += (p.width * p.height);
+    });
+    const leftover = totalArea - usedArea;
+    const usedPercentage = (usedArea / totalArea) * 100;
+
+    let html = `
+      <table class="table table-bordered">
+        <thead>
+          <tr>
+            <th>Pieza</th>
+            <th>Dimensiones (cm)</th>
+            <th>Posición (x,y)</th>
+            <th>Área (cm²)</th>
+          </tr>
+        </thead>
+        <tbody>
+    `;
+    placedPieces.forEach((p, index) => {
+      const area = p.width * p.height;
+      html += `
+        <tr>
+          <td>${p.label} (#${index + 1})</td>
+          <td>${p.width} x ${p.height}</td>
+          <td>(${p.x}, ${p.y})</td>
+          <td>${area}</td>
+        </tr>
+      `;
+    });
+    html += `
+        </tbody>
+      </table>
+      <p><strong>Material:</strong> ${materialType} ${baseThickness ? (baseThickness + " mm") : ""}</p>
+      <p><strong>Área total de la placa:</strong> ${totalArea} cm²</p>
+      <p><strong>Área ocupada:</strong> ${usedArea} cm²</p>
+      <p><strong>Área sobrante:</strong> ${leftover} cm²</p>
+      <p><strong>Aprovechamiento:</strong> ${usedPercentage.toFixed(2)}%</p>
+    `;
+
+    // Calcular el mayor espacio libre y ver qué cortes podrían entrar
+    try {
+      const freeRect = computeMaxFreeRectangle(); 
+      html += `<p><strong>Mayor espacio libre:</strong> ${freeRect.width} x ${freeRect.height} cm (Área: ${freeRect.area} cm²)</p>`;
+
+      // Determinar qué cortes podrían caber en ese espacio
+      const allowRotation = document.getElementById('allowRotation').checked;
+      let posibles = [];
+      pieces.forEach(piece => {
+        // Chequeo sin rotar
+        let fitsNoRotate = piece.width <= freeRect.width && piece.height <= freeRect.height;
+        // Chequeo con rotar (si se permite)
+        let fitsRotate = allowRotation && piece.height <= freeRect.width && piece.width <= freeRect.height;
+
+        if (fitsNoRotate || fitsRotate) {
+          posibles.push(piece.label);
+        }
+      });
+      if (posibles.length > 0) {
+        html += `<p><strong>Cortes que podrían entrar en ese espacio:</strong> ${posibles.join(", ")}</p>`;
+      } else {
+        html += `<p><strong>Cortes que podrían entrar en ese espacio:</strong> Ninguno</p>`;
+      }
+    } catch (error) {
+      html += `<p class="text-warning">No se pudo calcular el espacio libre adicional.</p>`;
+    }
+
+    summaryDiv.innerHTML = html;
+  }
+
+  // =========================
+  // 9. EVENTOS PRINCIPALES
+  // =========================
+  window.addEventListener('DOMContentLoaded', () => {
+    loadDefaultData();
+  });
+
+  document.getElementById('configForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    try {
+      readForm();
+      placedPieces = [];
+      drawBoard();
+
+      if (mode === 'auto') {
+        autoPlacePiecesWith2DCutting();
+        drawBoard();
+      } else if (mode === 'manual') {
+        initManualPlacement();
+      }
+      showSummary();
+    } catch (err) {
+      errorMsg.textContent = err.message;
+    }
+  });
+
+  document.getElementById('printBtn').addEventListener('click', function() {
+    window.print();
+  });
+</script>
+</body>
+</html>
